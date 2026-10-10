@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FPS Prototype</title>
+  <style>
+    html, body {
+      margin: 0;
+      overflow: hidden;
+      background: #000;
+      font-family: Arial, sans-serif;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      background: linear-gradient(#87ceeb, #dfefff);
+    }
+    #crosshair {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      width: 16px;
+      height: 16px;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      z-index: 10;
+    }
+    #crosshair::before, #crosshair::after {
+      content: "";
+      position: absolute;
+      background: rgba(255,255,255,0.9);
+      box-shadow: 0 0 6px rgba(0,0,0,0.5);
+    }
+    #crosshair::before {
+      left: 7px; top: 0; width: 2px; height: 16px;
+    }
+    #crosshair::after {
+      left: 0; top: 7px; width: 16px; height: 2px;
+    }
+    #hud {
+      position: fixed;
+      right: 24px;
+      top: 24px;
+      color: white;
+      font-size: 16px;
+      background: rgba(0,0,0,0.35);
+      padding: 10px 14px;
+      border-radius: 8px;
+      z-index: 11;
+      font-weight: bold;
+      letter-spacing: 0.5px;
+    }
+  </style>
+</head>
+<body>
+  <div id="crosshair"></div>
+  <div id="hud">M4A4 | Sağ tık / sol klik ile ateş</div>
+
+  <script type="module">
+    import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+    import { PointerLockControls } from "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/controls/PointerLockControls.js";
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x9fd3ff);
+    scene.fog = new THREE.Fog(0x9fd3ff, 25, 120);
+
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 300);
+    camera.position.set(0, 1.7, 18);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    const controls = new PointerLockControls(camera, document.body);
+    scene.add(controls.getObject());
+
+    const clock = new THREE.Clock();
+
+    // ---- world setup ----
+    const world = new THREE.Group();
+    scene.add(world);
+
+    const ambient = new THREE.HemisphereLight(0xffffff, 0x4a5b5a, 1.1);
+    scene.add(ambient);
+
+    const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+    sun.position.set(15, 25, 10);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    scene.add(sun);
+
+    // Ground
+    const ground = new THREE.Mesh(
+      new THREE.BoxGeometry(220, 2, 220),
+      new THREE.MeshStandardMaterial({ color: 0x7aa86c, roughness: 1 })
+    );
+    ground.position.y = -1;
+    ground.receiveShadow = true;
+    world.add(ground);
+
+    // colliders + breakables
+    const colliders = [];
+    const breakables = [];
+
+    function addCollider(mesh, halfExtentX = 1, halfExtentY = 1, halfExtentZ = 1) {
+      colliders.push({
+        x: mesh.position.x,
+        y: mesh.position.y,
+        z: mesh.position.z,
+        w: halfExtentX,
+        h: halfExtentY,
+        d: halfExtentZ,
+        mesh
+      });
+    }
+
+    function addBox(x, y, z, w, h, d, color = 0x8b8f97, isBreakable = false) {
+      const mat = new THREE.MeshStandardMaterial({ color, roughness: 0.9, metalness: 0.3 });
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+      mesh.position.set(x, y, z);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      world.add(mesh);
+
+      if (isBreakable) {
+        mesh.userData.breakable = true;
+        mesh.userData.health = 1;
+        mesh.material.transparent = true;
+        mesh.material.opacity = 0.55;
+        breakables.push(mesh);
+      }
+
+      addCollider(mesh, w / 2, h / 2, d / 2);
+      return mesh;
+    }
+
+    // Outer barriers
+    addBox(0, 2, -30, 60, 4, 2, 0x6f7a87);
+    addBox(0, 2, 30, 60, 4, 2, 0x6f7a87);
+    addBox(-30, 2, 0, 2, 4, 60, 0x6f7a87);
+    addBox(30, 2, 0, 2, 4, 60, 0x6f7a87);
+
+    // Building: front opening as door gap
+    const buildingGroup = new THREE.Group();
+    world.add(buildingGroup);
+
+    // Bina duvarları
+    addBox(-12, 2.5, 0, 2, 5, 18, 0x9a9a9a); // sol duvar
+    addBox(12, 2.5, 0, 2, 5, 18, 0x9a9a9a);  // sağ duvar
+    addBox(0, 2.5, -9, 24, 5, 2, 0x9a9a9a);   // arka duvar
+    addBox(0, 2.4, 9, 24, 5, 2, 0x9a9a9a);    // ön duvar (kapı boşluğu olacak şekilde 2 duvar parçası)
+    addBox(-7, 2.4, 9, 10, 5, 2, 0x9a9a9a);
+    addBox(7, 2.4, 9, 10, 5, 2, 0x9a9a9a);
+
+    // Bina çatısı
+    addBox(0, 5.4, 0, 26, 1, 20, 0x5d6065);
+
+    // İçeride camlar (kırılabilir)
+    const glassPositions = [
+      [-7, 2.2, -7, 3, 2.5, 0.2],
+      [-3, 2.2, -7, 3, 2.5, 0.2],
+      [1, 2.2, -7, 3, 2.5, 0.2],
+      [5, 2.2, -7, 3, 2.5, 0.2],
+      [-7, 2.2, 7, 3, 2.5, 0.2],
+      [-3, 2.2, 7, 3, 2.5, 0.2],
+      [1, 2.2, 7, 3, 2.5, 0.2],
+      [5, 2.2, 7, 3, 2.5, 0.2]
+    ];
+
+    for (const [x, y, z, w, h, d] of glassPositions) {
+      const glass = addBox(x, y, z, w, h, d, 0x7ed7ff, true);
+      glass.material.color.set(0x9ae8ff);
+      glass.material.emissive = new THREE.Color(0x1b82ff);
+      glass.material.emissiveIntensity = 0.2;
+    }
+
+    // Siperler (engeller)
+    addBox(-18, 1, -8, 3, 2, 3, 0x7c5c42);
+    addBox(-18, 1, 8, 3, 2, 3, 0x7c5c42);
+    addBox(18, 1, -8, 3, 2, 3, 0x7c5c42);
+    addBox(18, 1, 8, 3, 2, 3, 0x7c5c42);
+
+    // Merdiven / çatılara çıkış
+    for (let i = 0; i < 7; i++) {
+      addBox(20 + i * 1.2, 0.5 + i * 0.45, 11, 2, 0.7, 3, 0x9b9b9b);
+    }
+
+    // Small cover to allow passage without freewalk
+    addBox(0, 1.2, -18, 8, 2.4, 2.2, 0x6a6a6a);
+
+    // --- Gun Model ---
+    const gun = new THREE.Group();
+    camera.add(gun);
+    scene.add(camera);
+
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0x1e1e1e, roughness: 0.6, metalness: 0.8 });
+    const metalMat = new THREE.MeshStandardMaterial({ color: 0x3f3f3f, roughness: 0.4, metalness: 0.9 });
+
+    const receiver = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.22, 0.18), bodyMat);
+    receiver.position.set(0.65, -0.42, -0.9);
+    gun.add(receiver);
+
+    const stock = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.12, 0.12), metalMat);
+    stock.position.set(0.05, -0.47, -0.9);
+    gun.add(stock);
+
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.2, 12), metalMat);
+    barrel.rotation.z = Math.PI / 2;
+    barrel.position.set(1.15, -0.42, -0.9);
+    gun.add(barrel);
+
+    const grip = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.48, 0.12), bodyMat);
+    grip.position.set(0.45, -0.72, -0.9);
+    grip.rotation.z = 0.15;
+    gun.add(grip);
+
+    const magazine = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.44, 0.1), bodyMat);
+    magazine.position.set(0.48, -0.8, -0.9);
+    gun.add(magazine);
+
+    gun.position.set(0.3, -0.2, -1.2);
+
+    // Camera start
+    controls.getObject().position.set(0, 1.7, 16);
+
+    // --- Controls ---
+    const keys = {};
+    const move = { forward: false, backward: false, left: false, right: false };
+
+    document.addEventListener("keydown", (e) => {
+      keys[e.code] = true;
+      if (e.code === "KeyE") {
+        controls.lock();
+      }
+    });
+
+    document.addEventListener("keyup", (e) => {
+      keys[e.code] = false;
+    });
+
+    document.body.addEventListener("click", () => {
+      if (document.pointerLockElement !== document.body) {
+        controls.lock();
+        return;
+      }
+      shoot();
+    });
+
+    // ---- Collision detection ----
+    function collides(pos) {
+      const p = pos.clone();
+      const playerRadius = 0.65;
+      const playerHeight = 1.75;
+
+      for (const c of colliders) {
+        const dx = Math.abs(p.x - c.x);
+        const dz = Math.abs(p.z - c.z);
+        const dy = Math.abs(p.y - c.y);
+
+        const insideX = dx < (playerRadius + c.w);
+        const insideZ = dz < (playerRadius + c.d);
+        const insideY = dy < (playerHeight * 0.7 + c.h);
+
+        if (insideX && insideZ && insideY && c.mesh !== ground) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function updateMovement(delta) {
+      const speed = 12;
+
+      const forward = new THREE.Vector3();
+      camera.getWorldDirection(forward);
+      forward.y = 0;
+      forward.normalize();
+
+      const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+
+      const moveDir = new THREE.Vector3();
+      if (keys["KeyW"] || keys["ArrowUp"]) moveDir.add(forward);
+      if (keys["KeyS"] || keys["ArrowDown"]) moveDir.sub(forward);
+      if (keys["KeyA"] || keys["ArrowLeft"]) moveDir.sub(right);
+      if (keys["KeyD"] || keys["ArrowRight"]) moveDir.add(right);
+
+      if (moveDir.lengthSq() > 0) {
+        moveDir.normalize();
+        const next = controls.getObject().position.clone();
+
+        next.x += moveDir.x * speed * delta;
+        if (!collides(next)) controls.getObject().position.x = next.x;
+
+        next.z += moveDir.z * speed * delta;
+        if (!collides(next)) controls.getObject().position.z = next.z;
+
+        // Simple roof-stair climb: if player near stairs object area, raise Y slightly
+        if (controls.getObject().position.x > 18 && controls.getObject().position.z > 8) {
+          controls.getObject().position.y = 1.7 + (controls.getObject().position.x - 18) * 0.02;
+        } else {
+          controls.getObject().position.y = 1.7;
+        }
+      }
+    }
+
+    // ---- Shooting ----
+    const raycaster = new THREE.Raycaster();
+    const shootFlash = new THREE.Mesh(
+      new THREE.SphereGeometry(0.09, 12, 12),
+      new THREE.MeshBasicMaterial({ color: 0xffbb33 })
+    );
+    shootFlash.visible = false;
+    scene.add(shootFlash);
+
+    function shoot() {
+      const dir = new THREE.Vector3();
+      camera.getWorldDirection(dir);
+
+      raycaster.set(camera.position, dir);
+      const hits = raycaster.intersectObjects(breakables, false);
+
+      if (hits.length > 0) {
+        const target = hits[0].object;
+        target.userData.health -= 1;
+        if (target.userData.health <= 0) {
+          target.visible = false;
+          scene.remove(target);
+          const idx = breakables.indexOf(target);
+          if (idx !== -1) breakables.splice(idx, 1);
+          const cidx = colliders.findIndex(c => c.mesh === target);
+          if (cidx !== -1) colliders.splice(cidx, 1);
+        }
+      }
+
+      // muzzle flash
+      shootFlash.visible = true;
+      shootFlash.position.copy(camera.position).add(dir.clone().multiplyScalar(1.3));
+      setTimeout(() => { shootFlash.visible = false; }, 40);
+    }
+
+    // ------ Minor world details ------
+    const treeTrunks = [];
+    for (let i = 0; i < 18; i++) {
+      const trunk = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.22, 0.28, 2.2, 8),
+        new THREE.MeshStandardMaterial({ color: 0x5b3c26, roughness: 1 })
+      );
+      const x = (Math.random() - 0.5) * 50;
+      const z = (Math.random() - 0.5) * 50;
+      trunk.position.set(x, 1, z);
+      trunk.castShadow = true;
+      world.add(trunk);
+
+      const crown = new THREE.Mesh(
+        new THREE.SphereGeometry(1.2, 10, 10),
+        new THREE.MeshStandardMaterial({ color: 0x2a8b4a, roughness: 0.9 })
+      );
+      crown.position.set(x, 3.2, z);
+      crown.castShadow = true;
+      world.add(crown);
+    }
+
+    // ---- Render loop ----
+    function animate() {
+      const delta = clock.getDelta();
+      updateMovement(delta);
+
+      renderer.render(scene, camera);
+      requestAnimationFrame(animate);
+    }
+    animate();
+
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
